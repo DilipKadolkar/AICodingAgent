@@ -1,0 +1,767 @@
+================================================================================
+AI CODING AGENT — CODE CAFE CODING CHALLENGE
+DEVELOPMENT PROMPT PACK
+================================================================================
+
+PURPOSE OF THIS FILE
+--------------------
+This file contains a complete, ordered set of prompts that can be fed to an
+AI coding assistant (e.g. Claude Code, GitHub Copilot Workspace, Cursor, etc.)
+to actually BUILD the "AI Coding Agent" described in the Code Cafe challenge.
+No implementation code is included here — only the prompts. Each prompt is
+self-contained enough to be run on its own, but they are ordered so that
+running them in sequence produces the full application incrementally.
+
+TECH STACK (fixed for every prompt below)
+------------------------------------------
+- Backend:        Java 21
+- Framework:       Spring Boot 3.3.x (Spring Web, Spring Data JPA, Spring
+                    WebSocket/SSE, Spring Validation, Spring Actuator)
+- Frontend:        React 18+ (Vite), plain CSS or Tailwind, fetch/EventSource
+                    for streaming
+- Database:        MySQL (assume already installed and running locally;
+                    connect via JDBC, do not containerize it)
+- Local AI model:  Ollama (assume already installed and running locally on
+                    http://localhost:11434; integrate via Ollama's REST API,
+                    no external/cloud coding-agent APIs of any kind)
+
+HOW TO USE THIS FILE
+---------------------
+1. Feed "PROMPT 0" first to scaffold the repo.
+2. Feed the prompts in numeric order (1 -> 21). Each prompt assumes the
+   previous ones have been completed and is written as a standalone
+   instruction to an AI coding agent working inside the generated repo.
+3. Each requirement (R1..R40) from the challenge brief is explicitly mapped
+   to the prompt(s) that implement it — see the traceability matrix at the
+   bottom of this file.
+4. Prompts 18-21 are verification / polish / demo prompts — run them last.
+
+================================================================================
+PROMPT 0 — PROJECT SCAFFOLDING
+================================================================================
+You are setting up a new full-stack project called "AI Coding Agent".
+
+Create the following repository layout:
+
+  /backend   -> Spring Boot 3.3.x application, Java 21, Maven (or Gradle),
+                packages under com.codecafe.aicodingagent
+  /frontend  -> React 18 app created with Vite, using JavaScript or
+                TypeScript
+
+Backend requirements:
+- Add dependencies: spring-boot-starter-web, spring-boot-starter-data-jpa,
+  spring-boot-starter-validation, spring-boot-starter-websocket,
+  mysql-connector-j, spring-boot-starter-actuator, lombok (optional),
+  spring-boot-devtools (dev only).
+- Configure application.yml with a MySQL datasource pointing at
+  jdbc:mysql://localhost:3306/ai_coding_agent (env-overridable via
+  SPRING_DATASOURCE_URL / _USERNAME / _PASSWORD), and
+  spring.jpa.hibernate.ddl-auto=update for local development.
+- Add an `ollama.base-url` config property defaulting to
+  http://localhost:11434 and `ollama.model` defaulting to a small local
+  model name (e.g. "llama3.1" or "codellama"), both overridable via env
+  vars.
+- Set up CORS to allow the Vite dev server origin (http://localhost:5173)
+  to call the backend during development.
+- Create an empty health-check REST controller at GET /api/health that
+  returns {"status":"UP"}.
+
+Frontend requirements:
+- Scaffold a React app with a basic folder structure: src/components,
+  src/hooks, src/api, src/pages.
+- Add a proxy config (vite.config.js) so calls to /api/* are forwarded to
+  the backend on port 8080 during development.
+- Add a placeholder single-page layout with a header "AI Coding Agent".
+
+Do not implement any business logic yet — this prompt is scaffolding only.
+Include a root README.md describing how to run MySQL, Ollama, backend, and
+frontend locally, and confirm the health-check endpoint works end-to-end
+from the React app.
+
+================================================================================
+PROMPT 1 — DOMAIN MODEL & DATABASE SCHEMA
+================================================================================
+Design and implement the JPA entities and MySQL schema needed to support a
+coding-assistant session with full transcript persistence and resumability.
+
+Entities to create (adjust names/fields as needed but cover all of this):
+
+1. CodingSession
+   - id (UUID, PK)
+   - title (String, auto-generated or user-supplied)
+   - status (enum: IDLE, PROCESSING, EXECUTING, COMPLETED, FAILED)
+   - repositoryPath (String — path to the repo the agent is working in)
+   - createdAt, updatedAt, endedAt (timestamps)
+   - summary (TEXT, nullable — filled in when session ends)
+
+2. SessionMessage
+   - id (UUID, PK)
+   - session_id (FK -> CodingSession)
+   - role (enum: USER, AGENT, SYSTEM)
+   - content (TEXT)
+   - createdAt (timestamp)
+   - sequenceNumber (int, for ordering)
+
+3. ToolCall
+   - id (UUID, PK)
+   - session_id (FK -> CodingSession)
+   - message_id (FK -> SessionMessage, nullable)
+   - toolName (enum/string: LIST_FILES, SEARCH_CODE, READ_FILE,
+     ANALYZE_STRUCTURE, CREATE_FILE, MODIFY_FILE, REPLACE_CODE_SECTION,
+     EXECUTE_COMMAND, RUN_TESTS)
+   - inputParams (TEXT/JSON)
+   - outputResult (TEXT/JSON, truncated/paginated for large output)
+   - status (enum: STARTED, SUCCEEDED, FAILED)
+   - startedAt, finishedAt
+   - backupPath (String, nullable — populated for file-modifying tools)
+
+4. FileChangeRecord (or reuse ToolCall) capturing:
+   - filePath, changeType (CREATED, MODIFIED), backupFilePath, timestamp
+
+Implement Spring Data JPA repositories for each entity with query methods
+needed to: fetch a session's full transcript ordered by sequence, list all
+tool calls for a session filtered by toolName, list distinct files
+inspected/modified in a session, and list all non-idle (resumable) sessions
+ordered by updatedAt desc.
+
+Write a Flyway or plain SQL migration script (src/main/resources/db/migration
+or schema.sql) reflecting this schema so the database structure is explicit
+and reviewable, not just Hibernate auto-DDL.
+
+================================================================================
+PROMPT 2 — OLLAMA INTEGRATION SERVICE
+================================================================================
+Implement a backend service, OllamaClientService, that talks to the locally
+running Ollama instance to generate AI responses. This is the ONLY source of
+AI reasoning in this system — no external coding-agent APIs are permitted.
+
+Requirements:
+- Use Spring's RestClient or WebClient to call Ollama's /api/chat (preferred,
+  supports multi-turn message history) or /api/generate endpoint.
+- Support streaming responses (Ollama's NDJSON stream) so the frontend can
+  render tokens as they arrive, not just after full completion.
+- Accept a list of prior messages (system/user/assistant turns) to preserve
+  conversation context across the whole session, not just the latest
+  message.
+- Implement a system prompt that establishes the agent's persona: a
+  professional, conversational software engineering assistant that explores
+  the repository before recommending changes, explains its reasoning, and
+  uses the defined tool set responsibly.
+- Handle failure modes explicitly and produce a typed result/exception
+  distinguishing: Ollama process not reachable (connection refused),
+  requested model not pulled/available, request timeout, and malformed
+  response — each should map to a clear, user-friendly error rather than a
+  raw stack trace bubbling to the API layer.
+- Add a lightweight retry/backoff (e.g. 2 attempts) only for transient
+  connection failures, not for model errors.
+- Write unit tests using a mocked HTTP layer (MockWebServer or WireMock) to
+  verify request/response mapping, streaming parsing, and each failure path.
+
+================================================================================
+PROMPT 3 — REPOSITORY EXPLORATION TOOLS (READ-ONLY)
+================================================================================
+Implement a set of backend "tools" the agent can invoke to explore a target
+code repository before making recommendations. Put these behind a common
+CodeAgentTool interface/strategy so new tools can be added later, and log
+every invocation as a ToolCall row (see PROMPT 1).
+
+Implement these read-only tools:
+
+1. ListFilesTool
+   - Lists files/directories under a given path within the configured
+     repository root, with optional glob filtering and recursion depth
+     limit.
+   - Must reject any path that escapes the repository root (path traversal
+     protection).
+
+2. SearchCodeTool
+   - Searches file contents for a keyword, regex, or symbol name across the
+     repository (or a sub-path), returning file path + line number + matched
+     line + a few lines of surrounding context.
+   - Support excluding common noise directories (.git, node_modules,
+     target, build, dist).
+
+3. ReadFileTool
+   - Reads a specific file (optionally a line range) and returns its
+     contents, enforcing a maximum size/line count to avoid overwhelming the
+     model context.
+
+4. AnalyzeStructureTool
+   - Produces a structural summary of the repository: directory tree
+     (depth-limited), detected project type/build tool (Maven/Gradle/npm/
+     pip/etc. based on marker files), and key entry points (main classes,
+     package.json scripts, etc.).
+
+5. IdentifyRelevantFilesTool
+   - Given a natural-language task description, combines SearchCodeTool and
+     AnalyzeStructureTool results to shortlist the files most likely
+     relevant to the task, with a brief justification for each.
+
+Each tool method should return a structured result object (not raw strings)
+so the agent orchestrator (built in a later prompt) can both show it to the
+user and feed a serialized form back into the Ollama conversation context.
+
+Write unit tests for each tool covering: normal operation, empty results,
+and rejected/unsafe input (e.g. path traversal attempt).
+
+================================================================================
+PROMPT 4 — FILE MODIFICATION TOOLS (WITH BACKUPS)
+================================================================================
+Implement backend tools that let the agent create and modify files in the
+target repository, always safely.
+
+1. CreateFileTool
+   - Creates a new file at a given relative path with given content.
+   - Refuses to overwrite an existing file (that must go through
+     ModifyFileTool instead) and refuses paths outside the repository root.
+
+2. ModifyFileTool
+   - Overwrites an existing file's full contents.
+   - Before writing, copies the current file to a backup location, e.g.
+     <repo-root>/.ai-coding-agent-backups/<session-id>/<timestamp>__<relative-path>,
+     preserving the relative path structure, and records the backup path on
+     the associated ToolCall/FileChangeRecord.
+
+3. ReplaceCodeSectionTool
+   - Replaces a specific, uniquely-identified section of a file (e.g. by
+     exact text match, or by start/end line numbers) rather than the whole
+     file, to make targeted edits safer and diffs smaller.
+   - Must fail loudly (no partial write) if the target section is not found
+     or matches more than once, when matching by text.
+   - Also creates a backup before modifying, same as ModifyFileTool.
+
+4. BackupRestoreService (support utility, not a directly agent-invoked tool)
+   - Given a FileChangeRecord/backup path, can restore the original file —
+     used internally for rollback on verification failure if the agent
+     decides to revert, and exposed via an admin/debug endpoint for manual
+     recovery.
+
+All three tools must:
+- Validate the target path stays within the repository root.
+- Return a structured result including a unified diff (old vs new content)
+  for display to the user.
+- Be logged as ToolCall rows with backupPath populated.
+
+Write unit tests covering successful create/modify/replace, backup file
+creation and content correctness, path traversal rejection, and the
+"ambiguous match" failure case for ReplaceCodeSectionTool.
+
+================================================================================
+PROMPT 5 — COMMAND EXECUTION & VERIFICATION TOOLS
+================================================================================
+Implement backend tools that let the agent run approved development
+commands and verify code changes, with strict safety controls.
+
+1. ApprovedCommandRegistry
+   - A configurable allow-list (application.yml) of command prefixes the
+     agent is permitted to execute, e.g. "mvn test", "mvn -q compile",
+     "npm test", "npm run build", "npm run lint", "git status", "git diff".
+   - Any command not matching an allow-listed prefix must be rejected with a
+     clear reason, never silently altered or force-run.
+
+2. ExecuteCommandTool
+   - Executes an approved command inside the target repository's working
+     directory using ProcessBuilder, with a timeout (e.g. 60s configurable)
+     and captured stdout/stderr, exit code.
+   - Streams output incrementally where feasible so long-running commands
+     (like test suites) can show progress rather than blocking silently.
+   - Logs the command, exit code, and truncated output as a ToolCall.
+
+3. VerifyChangesTool
+   - A higher-level tool that, given a session/repo, runs the appropriate
+     test/validation command (auto-detected from AnalyzeStructureTool's
+     project-type detection, e.g. "mvn test" for Maven, "npm test" for
+     Node) and produces a structured VerificationResult: passed/failed,
+     summary counts if parseable, raw output, and duration.
+   - Should be callable after any file modification and its result must be
+     attachable to the session for later display (Requirement: display
+     verification results).
+
+Write unit tests: allow-list acceptance/rejection, timeout enforcement
+(use a deliberately slow dummy command), stdout/stderr capture correctness,
+and VerificationResult construction from both a passing and failing sample
+command.
+
+================================================================================
+PROMPT 6 — AGENT ORCHESTRATION LOOP
+================================================================================
+Implement the core AgentOrchestrator service that ties the Ollama client
+(PROMPT 2) and the tool set (PROMPTS 3-5) together into a working coding
+agent loop, driven by a CodingSession.
+
+Requirements:
+- Given a user's natural-language request plus the session's message
+  history, orchestrate a loop: send context + available tool descriptions
+  to Ollama, parse the model's response for a tool invocation request (use
+  a simple structured convention, e.g. the model emits a fenced JSON block
+  describing {tool, params} when it wants to call a tool, otherwise plain
+  text is treated as its final answer to the user).
+- After each tool call, append the tool's structured result back into the
+  conversation context and let the model continue reasoning, up to a
+  configurable max number of tool-call iterations per user request (to
+  prevent infinite loops), after which the agent must gracefully stop and
+  explain it reached the iteration limit.
+- Before recommending or making any change, the loop must ensure at least
+  one exploration tool (ListFiles/SearchCode/ReadFile/AnalyzeStructure/
+  IdentifyRelevantFiles) has been invoked for the current repository in this
+  session — if the model tries to jump straight to a file-modifying tool
+  without any prior exploration in the session, inject a system nudge
+  requiring exploration first.
+- Update CodingSession.status through the lifecycle (IDLE -> PROCESSING
+  while awaiting/streaming the model response -> EXECUTING while a tool
+  call is running -> back to PROCESSING or COMPLETED/FAILED) and persist
+  each transition.
+- Persist every user message, agent message, and tool call to the database
+  as they occur (not just at the end) so a crash mid-session loses minimal
+  data.
+- On any unhandled exception during the loop (tool crash, Ollama
+  unavailable mid-stream, DB write failure), catch it, mark the session
+  FAILED, persist a clear user-facing error message as an AGENT/SYSTEM
+  message, and ensure the loop terminates cleanly rather than hanging the
+  request.
+
+Write integration tests using a mocked Ollama client that scripts a
+multi-step tool-calling conversation (explore -> modify -> verify -> final
+answer) and asserts the resulting session status transitions and persisted
+messages/tool calls are correct. Include a test for the "tries to modify
+without exploring first" nudge, and a test for the max-iteration cutoff.
+
+================================================================================
+PROMPT 7 — SESSION LIFECYCLE REST API
+================================================================================
+Expose the session functionality via a REST API under /api/sessions.
+
+Endpoints:
+- POST   /api/sessions
+    Body: { repositoryPath, title? } -> creates a new CodingSession
+    (status IDLE) and returns it.
+- GET    /api/sessions
+    Lists sessions (paginated), most recently updated first, including
+    status, title, createdAt/updatedAt — used to populate a "resume a
+    session" list.
+- GET    /api/sessions/{id}
+    Returns full session detail including the ordered transcript
+    (messages) and tool calls, for resuming or reviewing a session.
+- POST   /api/sessions/{id}/messages
+    Body: { content } -> validates content is non-blank (reject empty/
+    whitespace-only requests with 400 and a clear message), appends a USER
+    message, and kicks off the AgentOrchestrator loop for that message.
+    Return either the full agent response (simple mode) or trigger the
+    streaming endpoint below.
+- GET    /api/sessions/{id}/stream (SSE, Server-Sent Events)
+    Streams agent tokens, status changes, and tool-call start/finish events
+    for the current in-flight request on that session, so the frontend can
+    render live progress (status indicator, tool calls appearing, streaming
+    text).
+- POST   /api/sessions/{id}/end
+    Marks the session COMPLETED (if not already FAILED), triggers summary
+    generation (PROMPT 8), and returns the finalized session including its
+    summary.
+- GET    /api/sessions/{id}/summary
+    Returns the stored summary once generated.
+
+Add request validation, consistent error response shape (e.g.
+{ "error": "...", "details": "..." }) for 400/404/500 cases, and OpenAPI/
+springdoc annotations documenting each endpoint. Write MockMvc/WebTestClient
+integration tests for the happy path of each endpoint plus the empty-message
+rejection and a not-found session case.
+
+================================================================================
+PROMPT 8 — SESSION SUMMARY GENERATION
+================================================================================
+Implement a SessionSummaryService that, when a session ends (or on demand),
+produces a structured, human-readable summary covering:
+
+- A short natural-language recap of what was accomplished, generated by
+  sending the session transcript (or a condensed version of it, if very
+  long) to Ollama with a dedicated summarization prompt.
+- Files inspected during the session (distinct file paths from
+  read/search/list/analyze tool calls).
+- Files created or modified during the session (distinct file paths from
+  create/modify/replace tool calls, each with change type).
+- Commands executed during the session (command text, exit code, whether it
+  was a verification/test command).
+- Verification results for any code changes (pass/fail, summary, and which
+  file changes they relate to, if determinable).
+- A basic processing summary: total duration, number of user turns, number
+  of tool calls by type, and whether the session ended COMPLETED or FAILED.
+
+Persist this as structured data (e.g. a JSON column or related child rows)
+plus the natural-language recap in CodingSession.summary, and make sure
+GET /api/sessions/{id}/summary returns all of the above in one response
+so the frontend can render each section (Requirements 36-40) without extra
+calls. Handle the case where Ollama is unavailable at summary time by still
+returning the structured (non-AI) parts of the summary with a note that the
+narrative recap could not be generated.
+
+Write unit tests for summary construction from a synthetic session
+(seeded messages/tool calls) and for the "Ollama unavailable during
+summary" fallback path.
+
+================================================================================
+PROMPT 9 — FRONTEND: SESSION START & LAYOUT
+================================================================================
+Build the React screens for starting and choosing a session.
+
+- A "Start new session" view: form to enter a repository path (and optional
+  title), calling POST /api/sessions on submit, then navigating into the
+  chat view for the created session.
+- A "Resume a session" view: fetches GET /api/sessions, lists past/active
+  sessions with title, status badge, and last-updated time, and lets the
+  user click one to resume into the chat view (loading its full transcript
+  via GET /api/sessions/{id}).
+- Overall app shell/navigation between "new session" and "resume session"
+  and the active chat screen.
+- Basic loading and error states for these API calls (e.g. backend
+  unreachable, invalid repository path) shown as user-friendly messages,
+  not raw error objects.
+
+Use a small API client module (src/api) wrapping fetch calls, and simple
+React state/hooks (no need for Redux) for session list and current session
+state.
+
+================================================================================
+PROMPT 10 — FRONTEND: CHAT TRANSCRIPT UI
+================================================================================
+Build the core chat interface component for an active session.
+
+- Render the ordered list of messages (user vs agent, visually distinct),
+  and interleaved tool-call entries showing: tool name, a human-readable
+  summary of its input, and its result (collapsible for long output such as
+  file contents or diffs).
+- Auto-scroll to the newest message/tool-call whenever new content arrives,
+  but don't fight the user if they've manually scrolled up to read history
+  (only auto-scroll when they're already near the bottom).
+- A persistent status indicator (Idle / Processing / Executing / Completed
+  / Failed) reflecting CodingSession.status, updated live via the SSE
+  stream, with distinct visual styling per state (e.g. color-coded badge).
+- Render agent explanations/reasoning text with basic Markdown formatting
+  (code blocks with syntax highlighting at least for common languages).
+- Render diffs (from file-modification tool results) in a readable
+  diff-style view (added/removed lines visually distinguished).
+
+Keep this as a set of focused, composable components (MessageList,
+MessageBubble, ToolCallCard, StatusBadge, DiffView) rather than one large
+component.
+
+================================================================================
+PROMPT 11 — FRONTEND: MESSAGE INPUT & LIVE STREAMING
+================================================================================
+Build the message input area and wire it to the streaming backend.
+
+- A text input (multi-line capable, e.g. textarea) with a "Send" button.
+- Keyboard shortcut: Enter submits (Shift+Enter inserts a newline); button
+  and shortcut both call the same submit handler.
+- Disable/reject submission when the input is empty or whitespace-only —
+  show inline feedback rather than sending a request.
+- Disable the input (or clearly indicate why) while the session status is
+  PROCESSING/EXECUTING, re-enabling once the agent reaches COMPLETED/back
+  to IDLE-for-input, so the user can't stack overlapping requests.
+- On submit: call POST /api/sessions/{id}/messages, then open/consume the
+  SSE stream from GET /api/sessions/{id}/stream to progressively render the
+  agent's streamed answer and any tool calls as they happen, updating the
+  status indicator in real time.
+- Provide an "End session" button, calling POST /api/sessions/{id}/end,
+  after which the input is disabled and the frontend navigates to/renders
+  the session summary view (PROMPT 12).
+- Surface backend errors (validation errors, Ollama unavailable, tool
+  execution failure) as clear, non-technical toast/inline messages, while
+  still logging the technical detail to the console for debugging.
+
+================================================================================
+PROMPT 12 — FRONTEND: SESSION SUMMARY VIEW
+================================================================================
+Build a summary screen shown after a session ends (or accessible any time
+via a "View summary" action on a completed/failed session from the resume
+list).
+
+Sections to render, sourced from GET /api/sessions/{id}/summary:
+- Narrative recap (what the agent did, in plain English).
+- "Files inspected" list.
+- "Files modified/created" list, with change type and a link/expand to view
+  the diff again.
+- "Commands executed" list with exit codes and a pass/fail icon for
+  verification commands.
+- "Verification results" section summarizing test/validation outcomes.
+- "Processing summary" panel: duration, turn count, tool-call counts by
+  type, final status (Completed/Failed).
+
+Make this view reachable both immediately after ending a session and later
+from the session list, and ensure it renders sensibly even if some sections
+are empty (e.g. a session where no files were modified).
+
+================================================================================
+PROMPT 13 — GRACEFUL DEGRADATION: OLLAMA UNAVAILABLE
+================================================================================
+Harden the system end-to-end for the case where the local Ollama model is
+unavailable or misbehaving.
+
+Backend:
+- On session creation or first message, if Ollama's health/tags endpoint is
+  unreachable or the configured model isn't listed as available, return a
+  clear, specific error (distinguish "Ollama not running" vs "model not
+  pulled") rather than a generic 500.
+- If Ollama becomes unavailable mid-session (e.g. mid-stream), catch the
+  failure, mark the in-flight turn FAILED (not the whole session
+  necessarily — allow retry), persist a SYSTEM message explaining what
+  happened, and push the failure over the SSE stream so the frontend
+  updates immediately instead of hanging.
+- Add a lightweight GET /api/health/ollama endpoint the frontend can poll on
+  app load to proactively warn the user before they even start a session.
+
+Frontend:
+- Show a non-blocking banner if Ollama is detected as unavailable at app
+  load, with guidance text (e.g. "Local AI model is not reachable — start
+  Ollama and try again").
+- If a request fails mid-session due to Ollama being unavailable, show a
+  clear inline error in the chat with a "Retry" action that resubmits the
+  same user message rather than forcing the user to retype it.
+
+Write backend tests simulating Ollama connection refusal and a "model not
+found" response, asserting the correct distinct error types/messages and
+that session/message state is left in a consistent, recoverable state
+(not corrupted or stuck PROCESSING forever).
+
+================================================================================
+PROMPT 14 — GRACEFUL DEGRADATION: TOOL & INFRA FAILURES
+================================================================================
+Harden the tool-execution and persistence paths against unexpected
+failures, independent of Ollama.
+
+- Wrap every tool invocation in the orchestrator with a try/catch that
+  converts any exception (IOException, permission denied, process launch
+  failure, DB write failure) into a structured ToolCall with status FAILED
+  and a concise error message, then lets the orchestrator continue the
+  conversation loop (feeding the failure back to the model so it can adapt,
+  e.g. try a different approach) instead of crashing the whole request.
+- If a file-modifying tool fails partway (e.g. backup succeeds but write
+  fails), ensure the original file is left untouched or is restorable from
+  the backup — never leave a corrupted/half-written file in place.
+- Add a global exception handler (@ControllerAdvice) mapping any unhandled
+  exception at the REST layer to a clean JSON error response with an
+  appropriate HTTP status, never leaking stack traces to the client (log
+  them server-side instead).
+- Add basic resiliency around the MySQL connection (sane connection pool
+  timeouts/retries via HikariCP config) so a transient DB blip doesn't
+  crash the whole app.
+
+On the frontend, ensure any of the above surfaces as a friendly, specific
+message (e.g. "Couldn't write to that file — it may be read-only" rather
+than "Error 500") using a shared error-message mapping utility, and that
+the UI never gets stuck in a spinner/Processing state indefinitely — add a
+reasonable client-side timeout that surfaces a "this is taking unusually
+long" message with a manual retry/cancel option.
+
+================================================================================
+PROMPT 15 — SESSION PERSISTENCE, RESUME & MULTI-SESSION SUPPORT
+================================================================================
+Ensure conversation history and session state survive backend restarts and
+can be fully resumed, not just displayed once.
+
+- Confirm (add tests if missing) that a full CodingSession — messages, tool
+  calls, backups metadata, and summary — is reconstructible purely from
+  MySQL after an application restart, with no in-memory-only state required
+  to render a past session correctly.
+- On "resume", the orchestrator must be able to accept a new user message
+  appended to an existing, previously-ended-or-idle session and continue
+  the conversation using the full prior transcript as context (respecting
+  Ollama's context window — implement a simple truncation/summarization
+  strategy for very long histories so old sessions remain usable rather
+  than erroring out).
+- Ensure concurrent safety: a session should not process two overlapping
+  user requests at once (e.g. reject/queue a new message while status is
+  PROCESSING/EXECUTING for that session) to avoid interleaved/corrupted
+  transcripts.
+- Add an index/query to efficiently list resumable sessions (already
+  IDLE/COMPLETED/FAILED) for the "resume a session" screen at scale.
+
+Write an integration test that: creates a session, adds messages/tool
+calls, simulates an application context restart (re-fetch via repository
+in a fresh transaction), and verifies the transcript and status are
+identical, plus a test that a second concurrent POST to the same session
+while PROCESSING is rejected with a clear "session busy" error.
+
+================================================================================
+PROMPT 16 — CONFIGURATION, SECURITY & SAFETY REVIEW
+================================================================================
+Do a focused hardening pass over the whole application before final
+verification.
+
+- Ensure the repositoryPath a user provides for a session is validated to
+  exist, be a directory, and (configurably) be restricted to an allowed
+  base directory to prevent the agent from being pointed at arbitrary
+  filesystem locations.
+- Re-verify every filesystem-touching tool (list/search/read/create/modify/
+  replace) canonicalizes paths and rejects any resolved path outside the
+  session's repository root, including via symlinks.
+- Re-verify ExecuteCommandTool's allow-list cannot be bypassed via shell
+  metacharacters (e.g. reject "&&", ";", "|", backticks, "$(" in the
+  command string, or execute via ProcessBuilder with an explicit argument
+  list rather than a shell interpreter).
+- Confirm no external network calls are made for AI reasoning anywhere in
+  the codebase except to the configured local Ollama base URL (grep the
+  codebase for other AI SDKs/API keys and remove any).
+- Move all environment-specific values (DB credentials, Ollama URL/model,
+  allowed base directory, command allow-list) into application.yml /
+  environment variables — no hardcoded secrets or paths.
+- Add basic input length limits on user messages and tool outputs stored in
+  the DB to prevent unbounded growth from a single pathological request.
+
+Document findings/fixes briefly in README.md under a "Security & Safety"
+section.
+
+================================================================================
+PROMPT 17 — TESTING PASS: BACKEND
+================================================================================
+Fill any test coverage gaps left by earlier prompts so the backend has a
+cohesive test suite.
+
+- Unit tests for every tool (list/search/read/analyze/identify/create/
+  modify/replace/execute/verify) covering success, expected failure, and
+  security-rejection cases.
+- Unit tests for OllamaClientService covering streaming parse, all defined
+  failure types, and retry behavior.
+- Integration tests for the orchestrator loop covering: pure Q&A (no tools
+  needed), explore-then-modify-then-verify flow, exploration-required nudge,
+  max-iteration cutoff, and mid-loop tool failure recovery.
+- Integration tests (MockMvc/WebTestClient, using an embedded or Testcontainers
+  MySQL if available, otherwise H2 configured to mimic MySQL dialect only
+  for tests) for every REST endpoint's happy path and key error path.
+- A test verifying session summary generation end-to-end against a seeded
+  session.
+
+Ensure the whole suite runs via a single command (mvn test / gradle test)
+and report the final pass/fail status and coverage summary.
+
+================================================================================
+PROMPT 18 — TESTING PASS: FRONTEND
+================================================================================
+Add frontend tests (Vitest + React Testing Library) covering:
+
+- Rejecting submission of an empty/whitespace message (input stays
+  disabled/shows validation, no API call fires).
+- Enter-to-submit and Shift+Enter-for-newline keyboard behavior.
+- Status badge rendering correctly for each of Idle/Processing/Executing/
+  Completed/Failed.
+- Auto-scroll behavior: new message triggers scroll-to-bottom when already
+  near bottom, and does NOT force-scroll when the user has scrolled up.
+- Rendering of a tool-call card and a diff view from representative sample
+  data.
+- The "resume session" list rendering sessions and navigating into a
+  selected one.
+- Error-banner rendering when the Ollama-unavailable health check fails.
+
+Ensure tests run via a single command (npm test) and report pass/fail.
+
+================================================================================
+PROMPT 19 — END-TO-END MANUAL VERIFICATION SCRIPT
+================================================================================
+Produce (as a checklist in README.md or a VERIFICATION.md file — still just
+documentation/config, not app logic) a step-by-step manual QA script that
+walks through every requirement R1-R40 against the running application,
+with explicit pass/fail checkboxes, e.g.:
+
+- [ ] Start MySQL and Ollama locally; confirm the app detects both as
+      healthy on load.
+- [ ] Start a new session against a real sample repository path.
+- [ ] Ask a natural-language question ("what does this project do?") and
+      confirm the agent explores the repo (visible tool calls) before
+      answering.
+- [ ] Ask for a small code change; confirm exploration happens first, a
+      backup is created, a diff is shown, and a verification/test command
+      runs afterward with its result displayed.
+- [ ] Submit an empty message; confirm it's rejected client-side.
+- [ ] Kill Ollama mid-session and confirm a friendly error + retry appears,
+      without corrupting the session.
+- [ ] End the session and confirm the summary view shows inspected files,
+      modified files, commands executed, verification results, and a
+      processing summary.
+- [ ] Restart the backend and resume the same session from the list,
+      confirming full transcript and summary are intact.
+
+(Continue enumerating until every requirement R1-R40 has at least one
+corresponding checklist item — cross-reference the traceability matrix at
+the bottom of this file.)
+
+================================================================================
+PROMPT 20 — POLISH PASS
+================================================================================
+Do a final UX/consistency pass without changing core architecture:
+
+- Consistent empty states (no sessions yet, no messages yet, no files
+  modified yet) with helpful copy instead of blank screens.
+- Consistent color/typography for status states, tool-call cards, and
+  diffs.
+- Basic responsive layout so the chat view is usable on a narrower browser
+  window.
+- Loading skeletons/spinners for session list and transcript loading,
+  distinct from the PROCESSING/EXECUTING agent-status indicator so users
+  don't confuse "page is loading" with "agent is thinking".
+- Confirm all user-facing copy is professional, clear, and free of
+  developer jargon/raw exception text (final check for Requirement 31).
+
+================================================================================
+PROMPT 21 — README & RUN INSTRUCTIONS FINALIZATION
+================================================================================
+Finalize README.md with:
+
+- Prerequisites (Java 21, Node.js version used, MySQL running locally with
+  a created ai_coding_agent database/user, Ollama running locally with the
+  configured model already pulled, e.g. `ollama pull llama3.1`).
+- Exact environment variables / application.yml keys to configure DB
+  credentials, Ollama base URL/model, allowed repository base directory,
+  and the command allow-list.
+- Step-by-step local run instructions for backend (mvn spring-boot:run or
+  the Gradle equivalent) and frontend (npm install && npm run dev).
+- A short architecture overview diagram-in-text (Session -> Orchestrator ->
+  Ollama + Tools -> MySQL) so a reviewer can quickly understand data flow.
+- A summary of which requirement each major module satisfies (link back to
+  the traceability matrix below, or inline it).
+
+================================================================================
+REQUIREMENT TRACEABILITY MATRIX (R1–R40 -> Prompt(s))
+================================================================================
+R1  Start a coding assistant session ............ PROMPT 7, 9
+R2  Generate responses using local AI model ...... PROMPT 2, 6
+R3  Maintain session context ..................... PROMPT 2, 6, 15
+R4  Accept natural-language SE requests .......... PROMPT 6, 11
+R5  Repository exploration before recommending ... PROMPT 3, 6
+R6  Professional, conversational interactions .... PROMPT 2, 20
+R7  Display user requests and agent responses .... PROMPT 10
+R8  Submit via button or keyboard shortcut ....... PROMPT 11
+R9  Auto-scroll to latest message ................ PROMPT 10
+R10 Clear agent status indicator ................. PROMPT 6, 10, 11
+R11 Prevent empty request submission ............. PROMPT 7, 11
+R12 End session at any time ...................... PROMPT 7, 11
+R13 Store complete session transcript ............ PROMPT 1, 6
+R14 List files in repository ..................... PROMPT 3
+R15 Search source code for keywords/symbols ...... PROMPT 3
+R16 Read source files ............................ PROMPT 3
+R17 Analyze project structure .................... PROMPT 3
+R18 Identify relevant files before acting ........ PROMPT 3
+R19 Create new files .............................. PROMPT 4
+R20 Modify existing files ......................... PROMPT 4
+R21 Replace specific code sections safely ........ PROMPT 4
+R22 Create backups before modifying files ........ PROMPT 4
+R23 Execute approved development commands ........ PROMPT 5
+R24 Verify changes via tests/validation ........... PROMPT 5, 6
+R25 Display tool calls performed ................. PROMPT 10
+R26 Display tool execution results ............... PROMPT 10
+R27 Generate explanations for code changes ....... PROMPT 2, 6
+R28 Provide reasoning behind solutions ............ PROMPT 2, 6
+R29 All AI processing local (no external APIs) ... PROMPT 2, 16
+R30 Gracefully handle unavailable AI model ....... PROMPT 13
+R31 User-friendly error messages ................. PROMPT 13, 14, 20
+R32 Recover gracefully from failures ............. PROMPT 14
+R33 Persist conversation history across sessions . PROMPT 1, 15
+R34 Resume a previous session .................... PROMPT 7, 9, 15
+R35 Generate session summary after completion .... PROMPT 8
+R36 Display files inspected ....................... PROMPT 8, 12
+R37 Display files modified ........................ PROMPT 8, 12
+R38 Display commands executed ..................... PROMPT 8, 12
+R39 Display verification results .................. PROMPT 5, 8, 12
+R40 Display processing summary .................... PROMPT 8, 12
+
+================================================================================
+END OF PROMPT PACK
+================================================================================
