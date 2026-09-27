@@ -34,7 +34,15 @@ HOW TO USE THIS FILE
 3. Each requirement (R1..R40) from the challenge brief is explicitly mapped
    to the prompt(s) that implement it — see the traceability matrix at the
    bottom of this file.
-4. Prompts 18-21 are verification / polish / demo prompts — run them last.
+4. Prompts 17-21 are dedicated verification / polish / demo prompts — run
+   them last, once Prompts 0-16 have built the full application.
+5. Every prompt (0-21) ends with its own "VALIDATION & TESTING" section.
+   Treat that section as an acceptance gate: do not consider a prompt done,
+   or move on to the next one, until its checks pass. This is in addition
+   to — not a replacement for — the dedicated test-suite prompts (17-18)
+   and the manual end-to-end verification script (19), which build out
+   comprehensive, cross-cutting coverage on top of each prompt's local
+   validation.
 
 ================================================================================
 PROMPT 0 — PROJECT SCAFFOLDING
@@ -77,6 +85,23 @@ Do not implement any business logic yet — this prompt is scaffolding only.
 Include a root README.md describing how to run MySQL, Ollama, backend, and
 frontend locally, and confirm the health-check endpoint works end-to-end
 from the React app.
+
+VALIDATION & TESTING
+---------------------
+- Backend: `mvn -q compile` (or the Gradle equivalent) succeeds with zero
+  errors; `mvn spring-boot:run` starts cleanly and logs a successful MySQL
+  connection pool initialization.
+- `curl http://localhost:8080/api/health` returns `{"status":"UP"}` with
+  HTTP 200.
+- Frontend: `npm install && npm run dev` starts Vite without errors; loading
+  the app in a browser shows the "AI Coding Agent" header.
+- End-to-end check (not just curl): trigger a fetch to `/api/health` from
+  inside the React app through the Vite proxy and confirm the UI reflects
+  the "UP" status — this validates CORS and the dev proxy together.
+- Add a minimal `@SpringBootTest` context-load test so later prompts have a
+  regression safety net from day one; confirm `mvn test` passes.
+- Only consider this prompt done once both `mvn test` and `npm run build`
+  succeed with no errors.
 
 ================================================================================
 PROMPT 1 — DOMAIN MODEL & DATABASE SCHEMA
@@ -128,6 +153,24 @@ Write a Flyway or plain SQL migration script (src/main/resources/db/migration
 or schema.sql) reflecting this schema so the database structure is explicit
 and reviewable, not just Hibernate auto-DDL.
 
+VALIDATION & TESTING
+---------------------
+- Run the migration against a real local MySQL instance and confirm all
+  tables/columns/enums exist via `SHOW TABLES` / `DESCRIBE <table>`.
+- Write repository-layer tests (`@DataJpaTest` or `@SpringBootTest` against
+  local MySQL) for each custom query method: ordered transcript fetch,
+  tool-call filter by type, distinct inspected/modified files, and
+  resumable-sessions ordering by updatedAt desc.
+- Test enum round-tripping: persist a ToolCall with every toolName/status
+  enum value and reload it to confirm no silent truncation/mismatch.
+- Verify cascade behavior with an explicit test: saving/deleting a
+  CodingSession does not orphan or unexpectedly cascade-delete its
+  SessionMessage/ToolCall rows.
+- Drop and re-run the migration against a fresh empty database to confirm
+  it is repeatable/idempotent, not something that only worked once.
+- `mvn test` must pass with these repository tests included before moving
+  on to PROMPT 2.
+
 ================================================================================
 PROMPT 2 — OLLAMA INTEGRATION SERVICE
 ================================================================================
@@ -154,8 +197,25 @@ Requirements:
   raw stack trace bubbling to the API layer.
 - Add a lightweight retry/backoff (e.g. 2 attempts) only for transient
   connection failures, not for model errors.
-- Write unit tests using a mocked HTTP layer (MockWebServer or WireMock) to
-  verify request/response mapping, streaming parsing, and each failure path.
+
+VALIDATION & TESTING
+---------------------
+- Unit tests using a mocked HTTP layer (MockWebServer or WireMock) covering:
+  a successful non-streamed response, a successful streamed NDJSON response
+  correctly reconstructed into full text, connection-refused (Ollama down),
+  a 404/"model not found" response, a request timeout, and a malformed or
+  truncated JSON chunk mid-stream.
+- Assert the retry/backoff fires only for transient connection failures
+  (check the mock's received-request count equals the configured attempts)
+  and does NOT retry on a clean model-side error response.
+- Assert the system prompt is actually present in every outgoing request
+  body (inspect the captured request in tests), and that prior
+  conversation turns are included and correctly ordered.
+- Manual smoke test against a real local Ollama: `ollama pull <model>`,
+  then send a real two-turn conversation through the service and confirm
+  the second answer is coherent with the first turn's content — proof that
+  context is actually being sent, not just unit-tested in isolation.
+- `mvn test` must pass with all failure-path tests green before proceeding.
 
 ================================================================================
 PROMPT 3 — REPOSITORY EXPLORATION TOOLS (READ-ONLY)
@@ -201,8 +261,26 @@ Each tool method should return a structured result object (not raw strings)
 so the agent orchestrator (built in a later prompt) can both show it to the
 user and feed a serialized form back into the Ollama conversation context.
 
-Write unit tests for each tool covering: normal operation, empty results,
-and rejected/unsafe input (e.g. path traversal attempt).
+VALIDATION & TESTING
+---------------------
+- Unit tests per tool covering: normal operation, empty results, and
+  rejected/unsafe input — additionally assert the exact JSON/DTO shape
+  each tool returns, since the orchestrator (PROMPT 6) will parse it.
+- Path-traversal regression tests for ListFilesTool and ReadFileTool using
+  `../` sequences, absolute paths, and a symlink that points outside the
+  repository root.
+- SearchCodeTool: test both regex and literal search modes explicitly, and
+  assert a match inside an excluded directory (e.g. node_modules) is never
+  returned.
+- AnalyzeStructureTool: test against at least two fixture repos (one
+  Maven-based, one npm-based) and assert the correct project type and
+  entry points are detected for each.
+- IdentifyRelevantFilesTool: test with a task description that clearly
+  maps to 1-2 files in a fixture repo; assert those files appear in the
+  shortlist with a non-empty justification string.
+- Every test above must also assert a ToolCall row was persisted with the
+  correct status — verifying the audit trail, not just the return value.
+- `mvn test` must pass before moving on to PROMPT 4.
 
 ================================================================================
 PROMPT 4 — FILE MODIFICATION TOOLS (WITH BACKUPS)
@@ -242,9 +320,25 @@ All three tools must:
   for display to the user.
 - Be logged as ToolCall rows with backupPath populated.
 
-Write unit tests covering successful create/modify/replace, backup file
-creation and content correctness, path traversal rejection, and the
-"ambiguous match" failure case for ReplaceCodeSectionTool.
+VALIDATION & TESTING
+---------------------
+- Unit tests covering successful create/modify/replace, backup file
+  creation, path traversal rejection, and the "ambiguous match"/"no match"
+  failure cases for ReplaceCodeSectionTool — and in each failure case,
+  explicitly assert the target file on disk is byte-for-byte unchanged.
+- Assert the backup file's content matches the pre-modification file
+  exactly, and that BackupRestoreService's restored file also matches the
+  original exactly (round-trip test: original -> backup -> restore ->
+  compare bytes).
+- CreateFileTool: test both the reject-existing-file case and that any
+  missing intermediate directories are created for a nested path.
+- Sequence test: run create -> modify -> replace on the same file and
+  assert three distinct backups exist with different timestamps and
+  correct historical content each.
+- Manual check: point the tools at a scratch git repository and run
+  `git diff` after each operation to confirm the tool's own unified diff
+  output matches git's diff exactly.
+- `mvn test` must pass before proceeding to PROMPT 5.
 
 ================================================================================
 PROMPT 5 — COMMAND EXECUTION & VERIFICATION TOOLS
@@ -277,10 +371,27 @@ commands and verify code changes, with strict safety controls.
      attachable to the session for later display (Requirement: display
      verification results).
 
-Write unit tests: allow-list acceptance/rejection, timeout enforcement
-(use a deliberately slow dummy command), stdout/stderr capture correctness,
-and VerificationResult construction from both a passing and failing sample
-command.
+VALIDATION & TESTING
+---------------------
+- Unit tests: allow-list acceptance/rejection, timeout enforcement (use a
+  deliberately slow dummy command), stdout/stderr capture correctness, and
+  VerificationResult construction from both a passing and a failing sample
+  command.
+- Security-focused tests: assert an unlisted command (e.g. "rm -rf /") is
+  rejected before any process is spawned — verify via a spy/mock that
+  ProcessBuilder was never invoked. Assert shell-metacharacter injection
+  attempts (e.g. "mvn test && rm -rf /") are rejected even when the prefix
+  matches an allow-listed command.
+- Test VerifyChangesTool against both a fixture project with a passing test
+  suite and one with a deliberately failing test; assert
+  VerificationResult.passed reflects reality and the raw output contains
+  the failure detail.
+- Test that the timeout genuinely kills a hanging process and returns a
+  clear timeout status rather than hanging the test run itself.
+- Manual check: run VerifyChangesTool against a real local Maven/npm
+  project and confirm its exit code and output match running the same
+  command directly in a terminal.
+- `mvn test` must pass before proceeding to PROMPT 6.
 
 ================================================================================
 PROMPT 6 — AGENT ORCHESTRATION LOOP
@@ -320,11 +431,29 @@ Requirements:
   message, and ensure the loop terminates cleanly rather than hanging the
   request.
 
-Write integration tests using a mocked Ollama client that scripts a
-multi-step tool-calling conversation (explore -> modify -> verify -> final
-answer) and asserts the resulting session status transitions and persisted
-messages/tool calls are correct. Include a test for the "tries to modify
-without exploring first" nudge, and a test for the max-iteration cutoff.
+VALIDATION & TESTING
+---------------------
+- Integration tests using a mocked Ollama client that scripts a multi-step
+  tool-calling conversation (explore -> modify -> verify -> final answer)
+  and asserts the resulting session status transitions and persisted
+  messages/tool calls are correct.
+- A dedicated test for the "tries to modify without exploring first" nudge,
+  and a dedicated test for the max-iteration cutoff (assert the loop stops
+  and produces a clear explanatory message rather than looping forever).
+- A test for mid-loop tool failure recovery: a tool throws mid-conversation
+  and the loop continues, feeding the failure back to the model instead of
+  crashing the whole request.
+- Assert every status transition (IDLE->PROCESSING->EXECUTING->...->
+  COMPLETED/FAILED) is persisted in the correct order, not just the final
+  state — read back the full transition history in the test, not only the
+  last value.
+- Assert that on an unhandled exception, the session ends FAILED with a
+  persisted SYSTEM message, and no background thread/task is left running.
+- Write a placeholder concurrency test now (two sequential requests on the
+  same session; assert the second only starts once the first fully
+  completes) — it will be completed fully once PROMPT 15 adds the
+  session-busy guard.
+- `mvn test` must pass before proceeding to PROMPT 7.
 
 ================================================================================
 PROMPT 7 — SESSION LIFECYCLE REST API
@@ -362,9 +491,25 @@ Endpoints:
 
 Add request validation, consistent error response shape (e.g.
 { "error": "...", "details": "..." }) for 400/404/500 cases, and OpenAPI/
-springdoc annotations documenting each endpoint. Write MockMvc/WebTestClient
-integration tests for the happy path of each endpoint plus the empty-message
-rejection and a not-found session case.
+springdoc annotations documenting each endpoint.
+
+VALIDATION & TESTING
+---------------------
+- MockMvc/WebTestClient integration tests for the happy path of every
+  endpoint plus the empty-message rejection (assert HTTP 400 with a clear
+  message) and a not-found session case (assert HTTP 404).
+- Assert the SSE endpoint emits multiple discrete events (not one blob) for
+  a scripted multi-tool-call response, using a test client that reads the
+  stream incrementally rather than waiting for it to close.
+- Contract-test the error response shape: every 4xx/5xx path must return
+  the documented `{ "error": ..., "details": ... }` JSON, never a default
+  Spring/Whitelabel error page.
+- Verify the generated OpenAPI spec is valid and lists all six endpoints:
+  `curl /v3/api-docs` and assert the JSON parses and contains each path.
+- Manual check with curl/Postman: create a session, post a message, stream
+  the SSE response, end the session, fetch the summary — confirm each
+  response shape matches what the frontend prompts (9-12) will expect.
+- `mvn test` must pass before proceeding to PROMPT 8.
 
 ================================================================================
 PROMPT 8 — SESSION SUMMARY GENERATION
@@ -394,9 +539,24 @@ calls. Handle the case where Ollama is unavailable at summary time by still
 returning the structured (non-AI) parts of the summary with a note that the
 narrative recap could not be generated.
 
-Write unit tests for summary construction from a synthetic session
-(seeded messages/tool calls) and for the "Ollama unavailable during
-summary" fallback path.
+VALIDATION & TESTING
+---------------------
+- Unit tests for summary construction from a synthetic session (seeded
+  messages/tool calls) and for the "Ollama unavailable during summary"
+  fallback path (assert structured sections still return correctly with a
+  clear note that the narrative recap failed).
+- Seed a session with a known, specific mix of tool calls and assert the
+  structured summary's inspected/modified-file lists and command list
+  exactly match the seeded data — no duplicates, no omissions.
+- Assert the processing-summary counts (turn count, tool-calls-by-type,
+  duration) are arithmetically correct against the seeded fixture, not
+  just "present."
+- Test that requesting the summary twice returns a stable, non-contradictory
+  result for the structured (non-AI) sections.
+- Manual check: end a real session produced via PROMPTS 6-7 and read the
+  generated narrative recap to confirm it doesn't reference files or
+  commands that never actually occurred (a hallucination check).
+- `mvn test` must pass before proceeding to PROMPT 9.
 
 ================================================================================
 PROMPT 9 — FRONTEND: SESSION START & LAYOUT
@@ -419,6 +579,20 @@ Build the React screens for starting and choosing a session.
 Use a small API client module (src/api) wrapping fetch calls, and simple
 React state/hooks (no need for Redux) for session list and current session
 state.
+
+VALIDATION & TESTING
+---------------------
+- Component tests (Vitest + React Testing Library): the "start new session"
+  form rejects an empty repository path, a successful submit navigates to
+  the chat view, and the "resume" list renders sessions with correct status
+  badges from mocked API data.
+- Explicit loading/error-state tests: mock a failed GET /api/sessions and
+  assert a friendly message renders — not a stack trace, raw error object,
+  or blank screen.
+- Manual browser check: with the real backend running, create a session,
+  refresh the page, and confirm it now appears in the resume list with the
+  correct status and timestamp.
+- `npm test` must pass before proceeding to PROMPT 10.
 
 ================================================================================
 PROMPT 10 — FRONTEND: CHAT TRANSCRIPT UI
@@ -444,6 +618,21 @@ Keep this as a set of focused, composable components (MessageList,
 MessageBubble, ToolCallCard, StatusBadge, DiffView) rather than one large
 component.
 
+VALIDATION & TESTING
+---------------------
+- Component tests for MessageList/MessageBubble/ToolCallCard/StatusBadge/
+  DiffView in isolation using a representative fixture transcript (mixed
+  message and tool-call entries, at least one long file-read result).
+- Explicit test: a ToolCallCard with a very long result stays collapsed by
+  default and expands on click.
+- Explicit test: StatusBadge renders a visually distinct output (assert on
+  class name/test-id, not just text) for all five statuses — Idle,
+  Processing, Executing, Completed, Failed.
+- Manual visual check in the browser with a seeded long transcript (mixed
+  code blocks, diffs, tool calls) confirming Markdown/syntax highlighting
+  render correctly and nothing overflows the layout.
+- `npm test` must pass before proceeding to PROMPT 11.
+
 ================================================================================
 PROMPT 11 — FRONTEND: MESSAGE INPUT & LIVE STREAMING
 ================================================================================
@@ -468,6 +657,24 @@ Build the message input area and wire it to the streaming backend.
   execution failure) as clear, non-technical toast/inline messages, while
   still logging the technical detail to the console for debugging.
 
+VALIDATION & TESTING
+---------------------
+- Interaction tests: submitting an empty/whitespace message is blocked
+  (assert no fetch call fires); Enter submits; Shift+Enter inserts a
+  newline instead of submitting.
+- Test the input becomes disabled while session status is PROCESSING/
+  EXECUTING (mock the SSE stream emitting those statuses) and re-enables on
+  COMPLETED/FAILED.
+- Test the "End session" button triggers the correct API call and
+  subsequent navigation to the summary view.
+- Mock a dropped/error SSE connection and assert a friendly inline error
+  appears — this is the frontend half of PROMPTS 13/14; write the test now
+  so it fully passes once those prompts land.
+- Manual check: submit a real multi-tool-call request against the running
+  backend + Ollama and watch tokens and tool calls stream in live without a
+  full-page reload.
+- `npm test` must pass before proceeding to PROMPT 12.
+
 ================================================================================
 PROMPT 12 — FRONTEND: SESSION SUMMARY VIEW
 ================================================================================
@@ -489,6 +696,20 @@ Sections to render, sourced from GET /api/sessions/{id}/summary:
 Make this view reachable both immediately after ending a session and later
 from the session list, and ensure it renders sensibly even if some sections
 are empty (e.g. a session where no files were modified).
+
+VALIDATION & TESTING
+---------------------
+- Component tests rendering the summary view from a fully-populated fixture
+  and from a sparse fixture (e.g., no files modified) — assert empty
+  sections show helpful empty-state copy, not blank space or thrown errors.
+- Test navigation from both entry points: "End session" straight into the
+  summary view, and the resume list's "View summary" action on a
+  completed/failed session.
+- Manual check: end a real session with at least one file change and one
+  verification run, and visually confirm every section (recap, inspected
+  files, modified files, commands, verification, processing summary) is
+  populated and readable.
+- `npm test` must pass before proceeding to PROMPT 13.
 
 ================================================================================
 PROMPT 13 — GRACEFUL DEGRADATION: OLLAMA UNAVAILABLE
@@ -517,10 +738,22 @@ Frontend:
   clear inline error in the chat with a "Retry" action that resubmits the
   same user message rather than forcing the user to retype it.
 
-Write backend tests simulating Ollama connection refusal and a "model not
-found" response, asserting the correct distinct error types/messages and
-that session/message state is left in a consistent, recoverable state
-(not corrupted or stuck PROCESSING forever).
+VALIDATION & TESTING
+---------------------
+- Backend tests simulating Ollama connection refusal and a "model not
+  found" response, asserting distinct error types/messages and that
+  session/message state stays consistent (never stuck PROCESSING forever).
+- A test for GET /api/health/ollama against both a reachable and an
+  unreachable Ollama (stub the base URL for the unreachable case).
+- Frontend test: mock the health check as failing at app load and assert
+  the warning banner renders; mock a mid-session Ollama failure and assert
+  the inline error + "Retry" action appear, and that clicking Retry
+  resubmits the exact same message content (not an empty/different one).
+- Manual check: actually stop the local Ollama process while using the
+  running app, and confirm the banner and mid-session error/retry behave
+  exactly as the mocked tests predict — this closes the gap between mocked
+  and real behavior.
+- `mvn test` and `npm test` must both pass before proceeding to PROMPT 14.
 
 ================================================================================
 PROMPT 14 — GRACEFUL DEGRADATION: TOOL & INFRA FAILURES
@@ -552,6 +785,26 @@ the UI never gets stuck in a spinner/Processing state indefinitely — add a
 reasonable client-side timeout that surfaces a "this is taking unusually
 long" message with a manual retry/cancel option.
 
+VALIDATION & TESTING
+---------------------
+- Tests forcing each failure type (IOException from a tool, DB write
+  failure, process-launch failure) and asserting the orchestrator loop
+  continues rather than crashing, with a FAILED ToolCall persisted each
+  time.
+- Regression test: simulate a write failure occurring right after a
+  successful backup, and assert the original file on disk remains
+  byte-identical to its pre-attempt state.
+- Test the global @ControllerAdvice handler: hit an endpoint that throws an
+  unexpected exception and assert the response body is the clean JSON error
+  shape with no stack trace text present anywhere in it.
+- Test HikariCP resiliency by simulating a transient connection drop (a
+  test proxy, or Testcontainers Toxiproxy if available) and confirming the
+  app recovers without a full restart.
+- Frontend test: mock a request that never resolves and assert the
+  client-side timeout fires the "taking unusually long" message with
+  working retry/cancel actions.
+- `mvn test` and `npm test` must both pass before proceeding to PROMPT 15.
+
 ================================================================================
 PROMPT 15 — SESSION PERSISTENCE, RESUME & MULTI-SESSION SUPPORT
 ================================================================================
@@ -575,11 +828,27 @@ can be fully resumed, not just displayed once.
 - Add an index/query to efficiently list resumable sessions (already
   IDLE/COMPLETED/FAILED) for the "resume a session" screen at scale.
 
-Write an integration test that: creates a session, adds messages/tool
-calls, simulates an application context restart (re-fetch via repository
-in a fresh transaction), and verifies the transcript and status are
-identical, plus a test that a second concurrent POST to the same session
-while PROCESSING is rejected with a clear "session busy" error.
+VALIDATION & TESTING
+---------------------
+- An integration test that: creates a session, adds messages/tool calls,
+  simulates an application context restart (re-fetch via repository in a
+  fresh transaction), and verifies the transcript and status are identical
+  before and after.
+- A test that a second concurrent POST to the same session while PROCESSING
+  is rejected with a clear "session busy" error, not silently queued or
+  interleaved.
+- A test for the context-truncation/summarization strategy: build a
+  transcript deliberately larger than the model's context window and
+  assert the orchestrator still responds without erroring, preserving the
+  most recent turns.
+- Sanity-check the "list resumable sessions" query against a seeded table
+  of a few hundred sessions, confirming correct ordering and reasonable
+  response time (not a full perf benchmark, just a smoke check on the
+  index).
+- Manual check: create a session, restart the actual backend process (not
+  just a test harness), and resume the session from the real UI to confirm
+  end-to-end persistence beyond the automated test.
+- `mvn test` must pass before proceeding to PROMPT 16.
 
 ================================================================================
 PROMPT 16 — CONFIGURATION, SECURITY & SAFETY REVIEW
@@ -610,6 +879,24 @@ verification.
 Document findings/fixes briefly in README.md under a "Security & Safety"
 section.
 
+VALIDATION & TESTING
+---------------------
+- Write regression tests for every fix made in this pass: the symlink-based
+  path-escape fix, the shell-metacharacter injection-bypass fix, and a
+  codebase-wide grep-based check/test asserting no external AI SDK imports
+  or hardcoded API keys/secrets exist anywhere in the source tree.
+- Manually attempt each previously-theoretical attack against the running
+  app (e.g., try to read `/etc/passwd` via ReadFileTool with a crafted
+  relative/symlinked path; try `mvn test; cat /etc/passwd` as a command)
+  and confirm every one is rejected with a clear error, never silently
+  sanitized or partially executed.
+- Add a config-validation check (and a test for it) that fails startup if a
+  hardcoded secret/URL is accidentally reintroduced.
+- Re-run the full backend and frontend test suites built so far after this
+  hardening pass to confirm nothing was broken — `mvn test` and `npm test`
+  must both stay green (PROMPTS 17-18 will later add further coverage on
+  top of this).
+
 ================================================================================
 PROMPT 17 — TESTING PASS: BACKEND
 ================================================================================
@@ -633,6 +920,22 @@ cohesive test suite.
 Ensure the whole suite runs via a single command (mvn test / gradle test)
 and report the final pass/fail status and coverage summary.
 
+VALIDATION & TESTING
+---------------------
+This prompt's deliverable IS a test suite, so validate the suite itself:
+- Run `mvn test` (or `gradle test`) from a fully clean checkout (`git clean
+  -xdf` first) and confirm 100% of tests pass with zero skips.
+- Generate a coverage report (JaCoCo) and flag any package below a
+  reasonable threshold (e.g. 70%) as a follow-up rather than silently
+  accepting it.
+- Mutation-style sanity check: temporarily break 3 critical pieces of
+  production code (the orchestrator loop, path-traversal rejection, the
+  command allow-list) one at a time and confirm the corresponding test
+  actually fails — then restore the code. This rules out tautological tests
+  that pass regardless of implementation.
+- Confirm the suite has no reliance on state left over from manually
+  running the app first (no shared mutable fixtures across test classes).
+
 ================================================================================
 PROMPT 18 — TESTING PASS: FRONTEND
 ================================================================================
@@ -652,6 +955,19 @@ Add frontend tests (Vitest + React Testing Library) covering:
 - Error-banner rendering when the Ollama-unavailable health check fails.
 
 Ensure tests run via a single command (npm test) and report pass/fail.
+
+VALIDATION & TESTING
+---------------------
+- Run `npm test` and confirm all tests pass, then run `npm run build`
+  immediately after to confirm the new tests didn't expose type errors or
+  build breakage.
+- Mutation-style sanity check: temporarily break 2-3 of the components
+  under test (e.g. make the empty-message guard a no-op, make StatusBadge
+  ignore its status prop) and confirm the corresponding tests fail before
+  restoring the code — proof the tests aren't tautological.
+- Confirm all tests run deterministically with no reliance on real network
+  calls — every API/SSE interaction must be mocked, not hitting a live
+  backend.
 
 ================================================================================
 PROMPT 19 — END-TO-END MANUAL VERIFICATION SCRIPT
@@ -683,6 +999,19 @@ with explicit pass/fail checkboxes, e.g.:
 corresponding checklist item — cross-reference the traceability matrix at
 the bottom of this file.)
 
+VALIDATION & TESTING
+---------------------
+- Actually execute the checklist end-to-end against a real running instance
+  (real MySQL, real Ollama, real browser) and record a genuine pass/fail
+  for every single item — do not check a box based on assumption or on the
+  automated tests alone.
+- Re-run the full automated suites (`mvn test`, `npm test`) immediately
+  before starting this manual pass, so manual QA time isn't spent
+  rediscovering regressions the automated tests would already have caught.
+- Any failed checklist item must be filed as a concrete follow-up fix,
+  referencing the earlier prompt number it belongs to, before the challenge
+  submission is considered ready.
+
 ================================================================================
 PROMPT 20 — POLISH PASS
 ================================================================================
@@ -699,6 +1028,19 @@ Do a final UX/consistency pass without changing core architecture:
   don't confuse "page is loading" with "agent is thinking".
 - Confirm all user-facing copy is professional, clear, and free of
   developer jargon/raw exception text (final check for Requirement 31).
+
+VALIDATION & TESTING
+---------------------
+- Manual visual regression check across the three main screens (start/
+  resume, chat, summary) at both a normal desktop width and a narrow
+  (mobile-ish) viewport width.
+- Re-run frontend component tests to confirm styling/markup changes didn't
+  break existing test selectors — update test-ids deliberately if any
+  changed, never accidentally.
+- Copy audit: grep the frontend source for raw error-object interpolation
+  (e.g. `${error.message}` rendered directly to the user) and confirm every
+  user-facing string is a curated, friendly message instead.
+- `npm test` must still pass after this pass before proceeding to PROMPT 21.
 
 ================================================================================
 PROMPT 21 — README & RUN INSTRUCTIONS FINALIZATION
@@ -717,6 +1059,18 @@ Finalize README.md with:
   Ollama + Tools -> MySQL) so a reviewer can quickly understand data flow.
 - A summary of which requirement each major module satisfies (link back to
   the traceability matrix below, or inline it).
+
+VALIDATION & TESTING
+---------------------
+- Follow the README's own run instructions exactly as written, step by
+  step, on a clean checkout (or as close to clean as feasible), and fix any
+  step that doesn't work as documented.
+- Confirm every environment variable/config key mentioned in the README
+  actually exists in application.yml and matches the real property names
+  used in code — no drift between documentation and implementation.
+- Final definition-of-done check: `mvn test` green, `npm test` green, and
+  the PROMPT 19 manual checklist fully passed — all three together, not
+  any one alone, are what makes the prompt pack's output submission-ready.
 
 ================================================================================
 REQUIREMENT TRACEABILITY MATRIX (R1–R40 -> Prompt(s))
