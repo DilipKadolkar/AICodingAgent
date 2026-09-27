@@ -1,0 +1,22 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;MODE=MySQL;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+
+ollama:
+  base-url: http://localhost:1
+  model: test-model
+  connect-timeout-seconds: 1
+  request-timeout-seconds: 2
+  max-retries: 0
+
+agent:
+  allowed-repository-base-dir: ""
+  max-tool-iterations: 5
+  command-timeout-seconds: 5

@@ -1,0 +1,69 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: ai-coding-agent
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/ai_coding_agent?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true}
+    username: ${SPRING_DATASOURCE_USERNAME:agent_user}
+    password: ${SPRING_DATASOURCE_PASSWORD:agent_pass}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      connection-timeout: 10000
+      maximum-pool-size: 10
+      minimum-idle: 2
+      max-lifetime: 1800000
+      validation-timeout: 5000
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+        jdbc:
+          time_zone: UTC
+  servlet:
+    multipart:
+      max-file-size: 5MB
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+ollama:
+  base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+  model: ${OLLAMA_MODEL:llama3.1}
+  connect-timeout-seconds: ${OLLAMA_CONNECT_TIMEOUT_SECONDS:5}
+  request-timeout-seconds: ${OLLAMA_REQUEST_TIMEOUT_SECONDS:60}
+  max-retries: 2
+
+agent:
+  allowed-repository-base-dir: ${AGENT_ALLOWED_BASE_DIR:}
+  max-tool-iterations: 8
+  command-timeout-seconds: 60
+  max-message-length: 8000
+  max-tool-output-length: 20000
+  approved-commands:
+    - "mvn test"
+    - "mvn -q compile"
+    - "mvn compile"
+    - "mvn package"
+    - "npm test"
+    - "npm run build"
+    - "npm run lint"
+    - "npm install"
+    - "git status"
+    - "git diff"
+    - "git log"
+
+cors:
+  allowed-origin: ${CORS_ALLOWED_ORIGIN:http://localhost:5173}
+
+logging:
+  level:
+    com.codecafe.aicodingagent: INFO
