@@ -4,6 +4,12 @@ server:
 spring:
   application:
     name: ai-coding-agent
+  # NOTE: these datasource properties describe the MySQL setup this app prefers.
+  # DatabaseFallbackConfigurer (run from main() before Spring Boot starts) checks
+  # whether MySQL is actually reachable and, if not, overrides these at runtime to
+  # point at a local H2 file database instead - see its javadoc, or README.md's
+  # "Running without MySQL" section. Set DB_AUTO_FALLBACK_H2=false to disable that
+  # and fail fast on an unreachable MySQL instead.
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/ai_coding_agent?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true}
     username: ${SPRING_DATASOURCE_USERNAME:agent_user}
