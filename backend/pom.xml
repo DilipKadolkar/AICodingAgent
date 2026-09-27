@@ -61,9 +61,11 @@
       <scope>test</scope>
     </dependency>
     <dependency>
+      <!-- runtime (not just test) scope: also used as the automatic local
+           fallback database when MySQL is not reachable at startup -->
       <groupId>com.h2database</groupId>
       <artifactId>h2</artifactId>
-      <scope>test</scope>
+      <scope>runtime</scope>
     </dependency>
   </dependencies>
 

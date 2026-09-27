@@ -23,7 +23,7 @@ implement it.
 - Java 21, Maven
 - Node.js 18+ and npm
 - MySQL running locally, with a database/user matching the config below
-  (or override via env vars)
+  (or override via env vars) — **optional**, see "Running without MySQL" below
 - Ollama running locally on `http://localhost:11434`, with a model pulled,
   e.g. `ollama pull llama3.1`
 
@@ -72,6 +72,32 @@ path, and chat with the agent. If Ollama isn't running, the app detects
 this and shows a friendly banner/error rather than hanging or crashing —
 this was verified directly in this sandbox, which has no Ollama runtime
 available (see **Environment note** below).
+
+## Running without MySQL
+
+You don't need MySQL installed to try this locally. On startup, the
+backend does a quick TCP check against the configured MySQL host/port
+(`localhost:3306` by default); if it's not reachable, it automatically
+falls back to a local file-based **H2** database instead (in MySQL
+compatibility mode, so nothing else about the app changes) and prints:
+
+```
+[ai-coding-agent] MySQL is not reachable at localhost:3306 - falling back
+to a local H2 database at ./data/ai_coding_agent.mv.db (set
+DB_AUTO_FALLBACK_H2=false to disable this).
+```
+
+The H2 file persists across restarts just like a real database (verified:
+stop the app, restart it, your sessions are still there). If MySQL becomes
+available later, just start it before the app and it will be preferred
+automatically — no config changes needed either way.
+
+Env vars for this behavior:
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `DB_AUTO_FALLBACK_H2` | `true` | Set to `false` to disable the fallback and fail fast on an unreachable MySQL instead (e.g. for a real deployment) |
+| `H2_DATA_PATH` | `./data/ai_coding_agent` | Where the H2 file database is stored when falling back |
 
 ## Architecture
 
@@ -126,7 +152,7 @@ React UI  --(fetch/SSE)-->  Spring Boot REST API  --(chat)-->  Ollama (local LLM
 ## Tests
 
 ```bash
-cd backend && mvn test     # 56 tests: tools, orchestrator, REST API, summary
+cd backend && mvn test     # 67 tests: tools, orchestrator, REST API, summary, DB fallback
 cd frontend && npm test    # 26 tests: components, pages, validation, banners
 ```
 
