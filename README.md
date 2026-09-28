@@ -25,7 +25,7 @@ implement it.
 - MySQL running locally, with a database/user matching the config below
   (or override via env vars) — **optional**, see "Running without MySQL" below
 - Ollama running locally on `http://localhost:11434`, with a model pulled,
-  e.g. `ollama pull llama3.1`
+  e.g. `ollama pull qwen2.5-coder:7b`
 
 ## Configuration
 
@@ -38,7 +38,7 @@ overridable via environment variables:
 | `SPRING_DATASOURCE_USERNAME` | `agent_user` | MySQL user |
 | `SPRING_DATASOURCE_PASSWORD` | `agent_pass` | MySQL password |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server |
-| `OLLAMA_MODEL` | `llama3.1` | Model to use |
+| `OLLAMA_MODEL` | `qwen2.5-coder:7b` | Model to use |
 | `AGENT_ALLOWED_BASE_DIR` | *(unset = no restriction)* | If set, sessions can only target repos under this directory |
 | `CORS_ALLOWED_ORIGIN` | `http://localhost:5173` | Frontend dev origin |
 
@@ -55,7 +55,7 @@ CREATE USER IF NOT EXISTS 'agent_user'@'localhost' IDENTIFIED BY 'agent_pass';
 GRANT ALL PRIVILEGES ON ai_coding_agent.* TO 'agent_user'@'localhost';"
 
 # 2. Start Ollama and pull a model (once)
-ollama pull llama3.1
+ollama pull qwen2.5-coder:7b
 
 # 3. Backend
 cd backend

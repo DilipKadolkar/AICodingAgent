@@ -12,8 +12,8 @@ spring:
   # and fail fast on an unreachable MySQL instead.
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/ai_coding_agent?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true}
-    username: ${SPRING_DATASOURCE_USERNAME:agent_user}
-    password: ${SPRING_DATASOURCE_PASSWORD:agent_pass}
+    username: ${SPRING_DATASOURCE_USERNAME:root}
+    password: ${SPRING_DATASOURCE_PASSWORD:D!l!p1475}
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
       connection-timeout: 10000
@@ -43,7 +43,7 @@ management:
 
 ollama:
   base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
-  model: ${OLLAMA_MODEL:llama3.1}
+  model: ${OLLAMA_MODEL:qwen2.5-coder:7b}
   connect-timeout-seconds: ${OLLAMA_CONNECT_TIMEOUT_SECONDS:5}
   request-timeout-seconds: ${OLLAMA_REQUEST_TIMEOUT_SECONDS:60}
   max-retries: 2
